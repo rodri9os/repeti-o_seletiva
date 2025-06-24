@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Selective Repeat Protocol Simulation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        canvas {
+            border: 1px solid #000;
+            margin-bottom: 20px;
+        }
+        #controls {
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 5px 10px;
+            margin-right: 10px;
+        }
+        #output {
+            width: 100%;
+            height: 250px;
+            border: 1px solid #ccc;
+            overflow-y: scroll;
+            font-family: monospace;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <h1>Selective Repeat Protocol Simulation</h1>
+    <div id="controls">
+        <button id="sendBtn">Send New</button>
+        <button id="stopBtn">Pause</button>
+        <button id="fastBtn">Faster</button>
+        <button id="slowBtn">Slower</button>
+        <button id="killBtn" disabled>Kill Packet/Ack</button>
+        <button id="resetBtn">Reset</button>
+    </div>
+    <canvas id="simulationCanvas" width="800" height="700"></canvas>
+    <div id="output"></div>
+
+    <script>
+        // Constants
+        const ADVANCE_PACKET = 5;
+        const sender_window_len_def = 5;
+        const receiver_window_len = 5;
+        const pack_width_def = 10;
+        const pack_height_def = 30;
+        const h_offset_def = 100;
+        const v_offset_def = 50;
+        const v_clearance_def = 300;
+        const TIMEOUT_MULTIPLIER = 1000;
+        const MIN_FPS = 3;
+        const FPS_STEP = 2;
+        const DESELECTED = -1;
+        const DEFAULT_FPS = 5;
+        const total_Packet_def = 20;
+        const time_out_sec_def = 25;
+
+        // Colors
+        const unack_color = "rgb(204, 230, 247)";
+        const ack_color = "yellow";
+        const sel_color = "green";
+        const roam_pack_color = "rgb(204, 230, 247)";
+        const roam_ack_color = "yellow";
+        const dest_color = "red";
+        const received_ack = "rgb(37, 135, 234)";
+
+        // Simulation variables
+        let base = 0;
+        let receiver_base = 0;
+        let nextseqsum = 0;
+        let fps = DEFAULT_FPS;
+        let selected = DESELECTED;
+        let timeout = 0;
+        let timeoutPacket = 0;
+        let lastKnownSucPacket = 0;
+        let timerFlag = false;
+        let timerSleep = false;
+        let animationId = null;
+        let timeoutId = null;
+
+        // Parameters
+        let window_len = sender_window_len_def;
+        let pack_width = pack_width_def;
+        let pack_height = pack_height_def;
+        let h_offset = h_offset_def;
+        let v_offset = v_offset_def;
+        let v_clearance = v_clearance_def;
+        let total_Packet = total_Packet_def;
+        let time_out_sec = time_out_sec_def;
+
+        // Sender array
+        let sender = [];
+
+        // DOM elements
+        const canvas = document.getElementById('simulationCanvas');
+        const ctx = canvas.getContext('2d');
+        const output = document.getElementById('output');
+        const sendBtn = document.getElementById('sendBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const fastBtn = document.getElementById('fastBtn');
+        const slowBtn = document.getElementById('slowBtn');
+        const killBtn = document.getElementById('killBtn');
+        const resetBtn = document.getElementById('resetBtn');
+
+        // Packet class
+        class SelectiveRepeatPacket {
+            constructor(onway, Packetpos, nextseq) {
+                this.on_way = onway;
+                this.selected = false;
+                this.reached_dest = false;
+                this.acknowledged = false;
+                this.Packet_ack = true;
+                this.received = false;
+                this.out_of_order = false;
+                this.Packet_pos = Packetpos;
+                this.ackFor = nextseq;
+                this.buffered = false;
+            }
+        }
+
+        // Initialize simulation
+        function init() {
+            output.innerHTML = "-- SelectiveRepeat Applet\n";
+            output.innerHTML += "-- Written By Matt Shatley & Chris Hoffman under the advisement of Professor Paul Amer\n";
+            output.innerHTML += "-- University of Delaware, 2008\n\n";
+            output.innerHTML += "-Ready to run. Press 'Send New' button to start.\n";
+
+            setupSimulationParams();
+
+            base = 0;
+            receiver_base = 0;
+            nextseqsum = 0;
+            fps = DEFAULT_FPS;
+            sender = new Array(total_Packet);
+
+            // Set up event listeners
+            sendBtn.addEventListener('click', () => actionPerformed("rdt"));
+            stopBtn.addEventListener('click', () => actionPerformed("stopanim"));
+            fastBtn.addEventListener('click', () => actionPerformed("fast"));
+            slowBtn.addEventListener('click', () => actionPerformed("slow"));
+            killBtn.addEventListener('click', () => actionPerformed("kl"));
+            resetBtn.addEventListener('click', () => actionPerformed("rst"));
+
+            canvas.addEventListener('mousedown', handleMouseDown);
+
+            // Start the animation loop
+            start();
+        }
+
+        // Setup simulation parameters
+        function setupSimulationParams() {
+            // In a real implementation, you would get these from URL parameters
+            // For now, we'll use the defaults
+            window_len = sender_window_len_def;
+            pack_width = pack_width_def;
+            pack_height = pack_height_def;
+            h_offset = h_offset_def;
+            v_offset = v_offset_def;
+            v_clearance = v_clearance_def;
+            total_Packet = total_Packet_def;
+            time_out_sec = time_out_sec_def;
+        }
+
+        // Start the simulation
+        function start() {
+            if (!animationId) {
+                animationId = requestAnimationFrame(run);
+            }
+        }
+
+        // Stop the simulation
+        function stop() {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+                animationId = null;
+            }
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+        }
+
+        // Main simulation loop
+        function run() {
+            let stopCheck = false;
+            if (sender[total_Packet - 1] != null) {
+                for (let i = total_Packet - window_len; i < total_Packet; i++) {
+                    if (!sender[i].acknowledged) {
+                        stopCheck = false;
+                        break;
+                    } else {
+                        stopCheck = true;
+                    }
+                }
+                if (stopCheck) {
+                    output.innerHTML += "Data Transferred - Simulation completed.\n";
+                    stop();
+                    return;
+                }
+            }
+
+            if (onTheWay(sender)) {
+                for (let i = 0; i < total_Packet; i++) {
+                    if (sender[i] != null && sender[i].on_way) {
+                        if (sender[i].Packet_pos < (v_clearance - pack_height)) {
+                            sender[i].Packet_pos += 5;
+                        } else if (sender[i].Packet_ack) {
+                            sender[i].reached_dest = true;
+                            if (check_upto_n(i)) {
+                                sender[i].Packet_pos = pack_height + 5;
+                                sender[i].Packet_ack = false;
+                                
+                                if (sender[i].buffered || sender[i].acknowledged) {
+                                    output.innerHTML += "(R) - Packet " + i + " received. Selective acknowledge for only Packet " + i + " sent.\n";
+                                    sender[i].received = true;
+                                } else if (!sender[i].received) {
+                                    output.innerHTML += "(R) - Packet " + i + " received. Selective acknowledge for only Packet " + i + " sent. Packet " + i + " delivered to application.\n";
+                                    sender[i].received = true;
+                                } else {
+                                    output.innerHTML += "(R) - Packet " + i + " received out of order. Selective acknowledge for only Packet " + i + " sent again(DUPACK)\n";
+                                }
+                                sender[i].received = true;
+                                deliverBuffer(i);
+                            } else if (sender[i].acknowledged) {
+                                sender[i].Packet_pos = pack_height + 5;
+                                sender[i].Packet_ack = false;
+                                output.innerHTML += "(R) - Packet " + i + " received. Selective acknowledge for only Packet " + i + " sent.\n";
+                                sender[i].received = true;
+                                deliverBuffer(i);
+                            } else {
+                                sender[i].buffered = true;
+                                sender[i].Packet_pos = pack_height + 5;
+                                sender[i].Packet_ack = false;
+                                output.innerHTML += "(R) - Packet " + i + " received out of order.  Packet buffered. Selective acknowledge for only Packet " + i + " sent.\n";
+                                sender[i].received = true;
+                                deliverBuffer(i);
+                                if (i == selected) {
+                                    selected = -1;
+                                    killBtn.disabled = true;
+                                }
+                            }
+                        } else if (!sender[i].Packet_ack) {
+                            output.innerHTML += "(S) - Selective ACK for only Packet " + i + " received. Timer for Packet " + i + " stopped.\n";
+                            sender[i].on_way = false;
+                            
+                            if (check_upto_n(i)) {
+                                sender[i].acknowledged = true;
+                                sender[i].buffered = false;
+                            } else {
+                                sender[i].acknowledged = true;
+                                sender[i].buffered = true;
+                            }
+                            
+                            if (i == selected) {
+                                selected = -1;
+                                killBtn.disabled = true;
+                            }
+                            
+                            if (timeoutId) {
+                                clearTimeout(timeoutId);
+                                timeoutId = null;
+                            }
+                            
+                            for (let k = base; k < total_Packet; k++) {
+                                if (sender[k] != null) {
+                                    if (sender[base].acknowledged) {
+                                        sender[base].buffered = false;
+                                        if (k + window_len < total_Packet) {
+                                            base = base + 1;
+                                        }
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                            
+                            if (nextseqsum < base + window_len) {
+                                sendBtn.disabled = false;
+                            }
+                            
+                            if (base != nextseqsum) {
+                                timerSleep = true;
+                                startTimer();
+                            }
+                        }
+                    }
+                }
+                updateCanvas();
+                
+                if (animationId) {
+                    setTimeout(() => {
+                        animationId = requestAnimationFrame(run);
+                    }, 1000 / fps);
+                }
+            } else {
+                stop();
+            }
+        }
+
+        // Start the timer for timeout
+        function startTimer() {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
+            timeoutId = setTimeout(() => {
+                retransmitOutstandingPackets();
+            }, time_out_sec * 1000);
+        }
+
+        // Deliver buffered packets
+        function deliverBuffer(PacketNumber) {
+            let j = 0;
+            
+            while (j < PacketNumber) {
+                if (sender[j] == null) {
+                    return;
+                } else if (sender[j].acknowledged) {
+                    sender[j].buffered = false;
+                    j++;
+                } else {
+                    break;
+                }
+            }
+            
+            if (j > 0) {
+                j--;
+            }
+            
+            for (let k = j; k < total_Packet; k++) {
+                if (sender[k] == null) {
+                    break;
+                } else if (sender[k].buffered) {
+                    sender[k].buffered = false;
+                    output.innerHTML += "(R) - Buffered Packet " + k + " delivered to application.\n";
+                } else if (sender[k].acknowledged) {
+                    sender[k].acknowledged = true;
+                    sender[k].buffered = false;
+                } else if (!sender[k].Packet_ack) {
+                    sender[k].buffered = false;
+                } else {
+                    break;
+                }
+            }
+            
+            let count = 0;
+            for (let i = 0; i < total_Packet; i++) {
+                if (sender[i] != null) {
+                    if (sender[i].received) {
+                        if (i + 1 <= (total_Packet - receiver_window_len)) {
+                            count = i + 1;
+                        }
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            receiver_base = count;
+        }
+
+        // Retransmit outstanding packets
+        function retransmitOutstandingPackets() {
+            let retransmitPacket = 0;
+            
+            for (let n = base; n < base + window_len; n++) {
+                if (sender[n] != null) {
+                    if (!sender[n].acknowledged && !sender[n].buffered) {
+                        sender[n].on_way = true;
+                        sender[n].Packet_ack = true;
+                        sender[n].Packet_pos = pack_height + 5;
+                        retransmitPacket++;
+                    } else if (!sender[n].acknowledged && sender[n].buffered) {
+                        sender[n].on_way = true;
+                        sender[n].Packet_ack = true;
+                        sender[n].Packet_pos = pack_height + 5;
+                        retransmitPacket++;
+                    }
+                }
+            }
+            
+            timerSleep = true;
+            
+            if (!animationId) {
+                start();
+            }
+            
+            if (retransmitPacket === 0) {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+            } else {
+                output.innerHTML += "(S) - Timeout occurred for Packet(s). Timer(s) restarted for Packet(s). \n";
+                startTimer();
+            }
+        }
+
+        // Handle button actions
+        function actionPerformed(cmd) {
+            if (cmd === "rdt" && nextseqsum < base + window_len) {
+                sender[nextseqsum] = new SelectiveRepeatPacket(true, pack_height + ADVANCE_PACKET, nextseqsum);
+                output.innerHTML += "(S) - Packet " + nextseqsum + " sent\n";
+                output.innerHTML += "(S) - Timer started for Packet " + nextseqsum + "\n";
+                
+                if (base === nextseqsum) {
+                    timerSleep = true;
+                    startTimer();
+                }
+                
+                updateCanvas();
+                nextseqsum++;
+                
+                if (nextseqsum === base + window_len) {
+                    sendBtn.disabled = true;
+                }
+                
+                start();
+            } else if (cmd === "fast") {
+                fps += FPS_STEP;
+                output.innerHTML += "-Simulation speed increased\n";
+            } else if (cmd === "slow" && fps > MIN_FPS) {
+                fps -= FPS_STEP;
+                output.innerHTML += "-Simulation speed decreased\n";
+            } else if (cmd === "stopanim") {
+                output.innerHTML += "- Simulation paused\n";
+                stop();
+                
+                if (timeoutId) {
+                    timerFlag = true;
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+                
+                stopBtn.textContent = "Resume";
+                stopBtn.onclick = () => actionPerformed("startanim");
+                
+                sendBtn.disabled = true;
+                slowBtn.disabled = true;
+                fastBtn.disabled = true;
+                killBtn.disabled = true;
+                
+                updateCanvas();
+            } else if (cmd === "startanim") {
+                output.innerHTML += "-Simulation resumed.\n";
+                stopBtn.textContent = "Pause";
+                stopBtn.onclick = () => actionPerformed("stopanim");
+                
+                if (timerFlag) {
+                    timerSleep = true;
+                    startTimer();
+                }
+                
+                sendBtn.disabled = false;
+                slowBtn.disabled = false;
+                fastBtn.disabled = false;
+                killBtn.disabled = false;
+                
+                updateCanvas();
+                start();
+            } else if (cmd === "kl") {
+                if (sender[selected].Packet_ack) {
+                    output.innerHTML += "- Packet " + selected + " lost\n";
+                } else {
+                    output.innerHTML += "- Selective Ack of Packet " + selected + " lost.\n";
+                }
+                
+                sender[selected].on_way = false;
+                killBtn.disabled = true;
+                selected = DESELECTED;
+                updateCanvas();
+            } else if (cmd === "rst") {
+                reset_app();
+            }
+        }
+
+        // Handle mouse down events
+        function handleMouseDown(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const location = Math.floor((x - h_offset) / (pack_width + 7));
+            
+            if (location >= total_Packet || location < 0) {
+                selected = DESELECTED;
+                return;
+            }
+            
+            if (sender[location] != null) {
+                const xpos = h_offset + (pack_width + 7) * location;
+                const ypos = sender[location].Packet_pos;
+                
+                if (x >= xpos && x <= xpos + pack_width && sender[location].on_way) {
+                    if ((sender[location].Packet_ack && y >= v_offset + ypos && y <= v_offset + ypos + pack_height) || 
+                        ((!sender[location].Packet_ack) && y >= v_offset + v_clearance - ypos && y <= v_offset + v_clearance - ypos + pack_height)) {
+                        
+                        if (sender[location].Packet_ack) {
+                            output.innerHTML += "- Packet " + location + " selected.\n";
+                        } else {
+                            output.innerHTML += "- Selective Ack " + location + " selected.\n";
+                        }
+                        
+                        sender[location].selected = true;
+                        selected = location;
+                        killBtn.disabled = false;
+                        updateCanvas();
+                    } else {
+                        output.innerHTML += "-Click on a moving Packet to select.\n";
+                        selected = DESELECTED;
+                    }
+                } else {
+                    output.innerHTML += "-Click on a moving Packet to select.\n";
+                    selected = DESELECTED;
+                }
+            }
+        }
+
+        // Update the canvas
+        function updateCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw sender and receiver windows
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 1;
+            
+            // Sender window
+            ctx.strokeRect(h_offset + base * (pack_width + 7) - 4, v_offset - 3, 
+                          window_len * (pack_width + 7) + 1, pack_height + 6);
+            
+            // Receiver window
+            ctx.strokeRect(h_offset + receiver_base * (pack_width + 7) - 4, v_offset + 222, 
+                          receiver_window_len * (pack_width + 7) + 1, pack_height + 6);
+            
+            // Draw packets and sequence numbers
+            for (let i = 0; i < total_Packet; i++) {
+                ctx.fillStyle = "black";
+                ctx.fillText("" + i, h_offset + (pack_width + 7) * i, v_offset - 4);
+                ctx.fillText("" + i, h_offset + (pack_width + 7) * i, v_offset + v_clearance + 30);
+                
+                if (sender[i] == null) {
+                    ctx.strokeStyle = "black";
+                    ctx.strokeRect(h_offset + (pack_width + 7) * i, v_offset, pack_width, pack_height);
+                    ctx.strokeRect(h_offset + (pack_width + 7) * i, v_offset + v_clearance, pack_width, pack_height);
+                } else {
+                    if (sender[i].acknowledged) {
+                        ctx.fillStyle = received_ack;
+                    } else {
+                        ctx.fillStyle = unack_color;
+                    }
+                    
+                    ctx.fillRect(h_offset + (pack_width + 7) * i, v_offset, pack_width, pack_height);
+                    
+                    if (sender[i].buffered) {
+                        ctx.fillStyle = "gray";
+                    } else {
+                        ctx.fillStyle = dest_color;
+                    }
+                    
+                    if (sender[i].reached_dest) {
+                        ctx.fillRect(h_offset + (pack_width + 7) * i, v_offset + v_clearance, pack_width, pack_height);
+                    } else {
+                        ctx.strokeStyle = "black";
+                        ctx.strokeRect(h_offset + (pack_width + 7) * i, v_offset + v_clearance, pack_width, pack_height);
+                    }
+                    
+                    if (sender[i].on_way) {
+                        if (i == selected) {
+                            ctx.fillStyle = sel_color;
+                        } else if (sender[i].Packet_ack) {
+                            ctx.fillStyle = roam_pack_color;
+                        } else if (sender[i].received) {
+                            ctx.fillStyle = roam_ack_color;
+                        } else {
+                            ctx.fillStyle = roam_ack_color;
+                        }
+                        
+                        if (sender[i].Packet_ack) {
+                            ctx.fillRect(h_offset + (pack_width + 7) * i, v_offset + sender[i].Packet_pos, pack_width, pack_height);
+                            ctx.fillStyle = "black";
+                            ctx.fillText("" + i, h_offset + (pack_width + 7) * i, v_offset + sender[i].Packet_pos + pack_height/2);
+                        } else {
+                            ctx.fillRect(h_offset + (pack_width + 7) * i, v_offset + v_clearance - sender[i].Packet_pos, pack_width, pack_height);
+                            if (sender[i].out_of_order) {
+                                ctx.fillStyle = "black";
+                                ctx.fillText("" + sender[i].ackFor, h_offset + (pack_width + 7) * i, v_offset + v_clearance - sender[i].Packet_pos + pack_height/2);
+                            } else {
+                                ctx.fillStyle = "black";
+                                ctx.fillText("" + i, h_offset + (pack_width + 7) * i, v_offset + v_clearance - sender[i].Packet_pos + pack_height/2);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Draw labels and legend
+            const newvOffset = v_offset + v_clearance + pack_height;
+            const newHOffset = h_offset;
+            
+            ctx.fillStyle = "black";
+            ctx.fillText("(S) - Action at Sender                  (R) - Action at Receiver", newHOffset + 60, newvOffset + 90);
+            
+            ctx.fillText("Packet", newHOffset + 15, newvOffset + 60);
+            ctx.fillText("Ack Received", newHOffset + 225, newvOffset + 60);
+            ctx.fillText("Ack", newHOffset + 170, newvOffset + 60);
+            ctx.fillText("Received", newHOffset + 85, newvOffset + 60);
+            ctx.fillText("Selected", newHOffset + 335, newvOffset + 60);
+            ctx.fillText("Buffered", newHOffset + 415, newvOffset + 60);
+            
+            ctx.fillText("base = " + base, h_offset + (pack_width + 7) * total_Packet + 10, v_offset + 33);
+            ctx.fillText("nextseqnum = " + nextseqsum, h_offset + (pack_width + 7) * total_Packet + 10, v_offset + 50);
+            
+            ctx.fillStyle = "blue";
+            ctx.fillText("Sender (Send Window Size = " + window_len + ")", h_offset + (pack_width + 7) * total_Packet + 10, v_offset + 12);
+            ctx.fillText("Receiver (Receiver Window Size = " + receiver_window_len + ")", h_offset + (pack_width + 7) * total_Packet + 10, v_offset + v_clearance + 12);
+            
+            // Draw legend
+            ctx.fillStyle = roam_pack_color;
+            ctx.fillRect(newHOffset, newvOffset + 50, 10, 10);
+            ctx.fillStyle = roam_ack_color;
+            ctx.fillRect(newHOffset + 155, newvOffset + 50, 10, 10);
+            ctx.fillStyle = received_ack;
+            ctx.fillRect(newHOffset + 210, newvOffset + 50, 10, 10);
+            ctx.fillStyle = dest_color;
+            ctx.fillRect(newHOffset + 70, newvOffset + 50, 10, 10);
+            ctx.fillStyle = sel_color;
+            ctx.fillRect(newHOffset + 320, newvOffset + 50, 10, 10);
+            ctx.fillStyle = "gray";
+            ctx.fillRect(newHOffset + 400, newvOffset + 50, 10, 10);
+        }
+
+        // Check if any packets are on the way
+        function onTheWay(pac) {
+            for (let i = 0; i < pac.length; i++) {
+                if (pac[i] == null) {
+                    return false;
+                } else if (pac[i].on_way) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Check if all packets up to packno have reached destination
+        function check_upto_n(packno) {
+            for (let i = 0; i < packno; i++) {
+                if (!sender[i].reached_dest) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Reset the simulation
+        function reset_app() {
+            for (let i = 0; i < total_Packet; i++) {
+                sender[i] = null;
+            }
+            
+            base = 0;
+            receiver_base = 0;
+            nextseqsum = 0;
+            selected = DESELECTED;
+            fps = DEFAULT_FPS;
+            timerFlag = false;
+            timerSleep = false;
+            
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
+            
+            if (stopBtn.textContent === "Resume") {
+                slowBtn.disabled = false;
+                fastBtn.disabled = false;
+            }
+            
+            sendBtn.disabled = false;
+            killBtn.disabled = true;
+            stopBtn.textContent = "Pause";
+            stopBtn.onclick = () => actionPerformed("stopanim");
+            
+            output.innerHTML += "---------------------------------------------------\n\n";
+            output.innerHTML += "-Simulation restarted. Press 'Send New' to start.\n";
+            updateCanvas();
+        }
+
+        // Initialize the simulation when the page loads
+        window.onload = init;
+    </script>
+</body>
+</html>
